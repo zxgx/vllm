@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
+import os
 import signal
 
 import uvloop
@@ -296,7 +297,51 @@ def run_api_server_worker_proc(
     # Set process title and add process-specific prefix to stdout and stderr.
     set_process_title("APIServer", str(server_index))
     decorate_logs()
+    _maybe_enable_debugpy(server_index)
 
     uvloop.run(
         run_server_worker(listen_address, sock, args, client_config, **uvicorn_kwargs)
     )
+
+
+def _maybe_enable_debugpy(server_index: int) -> None:
+    """Optionally enable debugpy for API worker debugging.
+
+    Env vars:
+      - VLLM_DEBUGPY_ENABLED: set to "1" to enable.
+      - VLLM_DEBUGPY_HOST: host for debugpy.listen (default: "127.0.0.1").
+      - VLLM_DEBUGPY_BASE_PORT: base port; final port = base + server_index.
+      - VLLM_DEBUGPY_WAIT_FOR_CLIENT: set to "1" to block until attach.
+      - VLLM_DEBUGPY_WORKER_INDEX: worker index to enable, or "all".
+    """
+    if os.getenv("VLLM_DEBUGPY_ENABLED", "0") != "1":
+        return
+
+    target_worker = os.getenv("VLLM_DEBUGPY_WORKER_INDEX", "0")
+    if target_worker != "all" and target_worker != str(server_index):
+        return
+
+    try:
+        import debugpy  # type: ignore
+    except ImportError as e:
+        raise RuntimeError(
+            "VLLM_DEBUGPY_ENABLED=1 but debugpy is not installed. "
+            "Install it with `pip install debugpy`."
+        ) from e
+
+    host = os.getenv("VLLM_DEBUGPY_HOST", "127.0.0.1")
+    base_port = int(os.getenv("VLLM_DEBUGPY_BASE_PORT", "5678"))
+    port = base_port + server_index
+    wait_for_client = os.getenv("VLLM_DEBUGPY_WAIT_FOR_CLIENT", "1") == "1"
+
+    logger.info(
+        "Enabling debugpy for API server worker %d on %s:%d (wait=%s).",
+        server_index,
+        host,
+        port,
+        wait_for_client,
+    )
+    debugpy.listen((host, port))
+    if wait_for_client:
+        logger.info("Waiting for debugger to attach on %s:%d ...", host, port)
+        debugpy.wait_for_client()
